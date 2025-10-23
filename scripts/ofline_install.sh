@@ -87,11 +87,10 @@ EOF
 modprobe overlay || true
 modprobe br_netfilter || true
 
-sysctl --system
-
 # ---------- 1.1) IP forwarding kalıcı + anında etkin ----------
 step "1.1) net.ipv4.ip_forward = 1 (kalıcı + runtime)"
 SYSCTL_FILE="/etc/sysctl.d/99-k8s.conf"
+
 
 # Calico için gerekli ana ayarlar
 cat > "${SYSCTL_FILE}" <<'EOF'
@@ -113,6 +112,7 @@ echo 1 > /proc/sys/net/ipv4/ip_forward || true
 
 # Systemd sysctl hizmetini tetikle
 systemctl restart systemd-sysctl || true
+sysctl --system
 
 # Doğrula ve gerekirse tekrar dene
 for i in 1 2 3; do
