@@ -146,22 +146,86 @@ systemctl enable --now containerd kubelet
 ok "Paketler kurulu"
 
 # ---------- 3) containerd ayarı ----------
-step "3) containerd ayarı (SystemdCgroup=true, pause:${PAUSE_TAG})"
-mkdir -p /etc/containerd
-[ -f /etc/containerd/config.toml ] || containerd config default >/etc/containerd/config.toml
-sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml || true
+step "3) containerd ayarı (CRI açık, SystemdCgroup=true, sandbox=pause:${PAUSE_TAG})"
 
-# CRI bloğunda sandbox_image'i kesin ayarla
+mkdir -p /etc/containerd
+
+# 3.1) Eğer config toml boş/şablon ise default config üret
+NEEDS_DEFAULT=0
+if [ ! -s /etc/containerd/config.toml ]; then
+  NEEDS_DEFAULT=1
+else
+  # İçinde CRI bloğu var mı?
+  if ! grep -q '^\[plugins\."io\.containerd\.grpc\.v1\.cri"\]' /etc/containerd/config.toml; then
+    NEEDS_DEFAULT=1
+  fi
+fi
+
+if [ "$NEEDS_DEFAULT" -eq 1 ]; then
+  containerd config default >/etc/containerd/config.toml
+fi
+
+# 3.2) SystemdCgroup=true ve sandbox_image=registry.k8s.io/pause:${PAUSE_TAG}
+#     Ayrıca disabled_plugins içinden "cri" varsa kaldır.
+cp -a /etc/containerd/config.toml /etc/containerd/config.toml.bak.$(date +%s) || true
 awk -v img="${PAUSE_REG}/pause:${PAUSE_TAG}" '
-  BEGIN{incri=0}
-  /^\[plugins\."io\.containerd\.grpc\.v1\.cri"\]/{incri=1}
-  /^\[plugins\./ && $0 !~ /\[plugins\."io\.containerd\.grpc\.v1\.cri"\]/{incri=0}
-  incri && $1 ~ /^sandbox_image/ {$0="  sandbox_image = \"" img "\""}
-  {print}
-' /etc/containerd/config.toml > /etc/containerd/config.toml.new && mv /etc/containerd/config.toml.new /etc/containerd/config.toml
+BEGIN{incri=0; seen_sandbox=0}
+# CRI bloğuna gir/çık
+/^\[plugins\."io\.containerd\.grpc\.v1\.cri"\]/{incri=1; print; next}
+(/^\[plugins\./ && $0 !~ /\[plugins\."io\.containerd\.grpc\.v1\.cri"\]/){ 
+  if (incri && !seen_sandbox){ print "  sandbox_image = \"" img "\"" } 
+  incri=0
+}
+# disabled_plugins içinden "cri"yi temizle
+/^\s*disabled_plugins\s*=/{
+  gsub(/"cri"\s*,?/, "", $0); gsub(/,\s*\]/, "]", $0); gsub(/\[\s*\]/, "[]", $0)
+  print; next
+}
+# sandbox_image satırını set et
+incri && $1 ~ /^sandbox_image/ { $0="  sandbox_image = \"" img "\""; seen_sandbox=1; print; next }
+{ print }
+END{
+  if (incri && !seen_sandbox){ print "  sandbox_image = \"" img "\"" }
+}
+' /etc/containerd/config.toml > /etc/containerd/config.toml.new && \
+mv /etc/containerd/config.toml.new /etc/containerd/config.toml
+
+# 3.3) SystemdCgroup=true (runc options altında)
+# containerd 1.6/1.7+ için aynı yol çalışır
+sed -i 's#^\(\s*SystemdCgroup = \)false#\1true#' /etc/containerd/config.toml || true
+# Eğer satır yoksa ekleyelim (runc options bloğunu bulup ekleme yapıyoruz)
+python3 - <<'PY' 2>/dev/null || true
+import re,sys
+p="/etc/containerd/config.toml"
+s=open(p).read()
+if "plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runc.options" not in s:
+    s=re.sub(r'(\[plugins\."io\.containerd\.grpc\.v1\.cri"\]\s*\n)',
+             r'\1  [plugins."io.containerd.grpc.v1.cri".containerd]\n'
+             r'    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]\n'
+             r'      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]\n'
+             r'        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]\n'
+             r'        SystemdCgroup = true\n', s, count=1)
+elif "SystemdCgroup" not in s:
+    s=re.sub(r'(\[plugins\."io\.containerd\.grpc\.v1\.cri"\.containerd\.runtimes\.runc\.options\]\s*\n)',
+             r'\1SystemdCgroup = true\n', s, count=1)
+open(p,"w").write(s)
+PY
 
 systemctl restart containerd
-ok "containerd hazır (sandbox_image=${PAUSE_REG}/pause:${PAUSE_TAG})"
+
+# 3.4) CRI plugin yüklü mü? (diagnostic)
+ctr plugins ls | grep -E 'io.containerd.grpc.v1.cri\s+ok' >/dev/null || warn "CRI plugin görünmüyor gibi!"
+
+# 3.5) crictl endpoint (uyarıları susturmak için)
+if [ ! -f /etc/crictl.yaml ]; then
+cat >/etc/crictl.yaml <<'YAML'
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint:   unix:///run/containerd/containerd.sock
+YAML
+fi
+
+ok "containerd hazır (CRI açık, sandbox_image=${PAUSE_REG}/pause:${PAUSE_TAG})"
+
 
 # ---------- 4) İmaj import ----------
 step "4) İmaj arşivlerini birleştir ve import et"
