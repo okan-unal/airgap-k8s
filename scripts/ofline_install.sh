@@ -87,16 +87,48 @@ EOF
 modprobe overlay || true
 modprobe br_netfilter || true
 
-cat >/etc/sysctl.d/k8s.conf <<'EOF'
+sysctl --system
+
+# ---------- 1.1) IP forwarding kalıcı + anında etkin ----------
+step "1.1) net.ipv4.ip_forward = 1 (kalıcı + runtime)"
+SYSCTL_FILE="/etc/sysctl.d/99-k8s.conf"
+
+# Calico için gerekli ana ayarlar
+cat > "${SYSCTL_FILE}" <<'EOF'
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward = 1
-# Calico için tipik öneriler (çoğu ortamda default uygundur):
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 EOF
-sysctl --system
+
+# /etc/sysctl.conf içine de yaz (bazı imajlarda yalnızca burası okunuyor olabilir)
+if ! grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf 2>/dev/null; then
+  echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
+fi
+
+# Runtime’da hemen uygula
+sysctl -w net.ipv4.ip_forward=1 || true
+echo 1 > /proc/sys/net/ipv4/ip_forward || true
+
+# Systemd sysctl hizmetini tetikle
+systemctl restart systemd-sysctl || true
+
+# Doğrula ve gerekirse tekrar dene
+for i in 1 2 3; do
+  CUR="$(cat /proc/sys/net/ipv4/ip_forward || echo 0)"
+  [ "$CUR" = "1" ] && { ok "ip_forward etkin (1)"; break; }
+  warn "ip_forward hala $CUR; tekrar uygula (deneme $i)"
+  sysctl -w net.ipv4.ip_forward=1 || true
+  echo 1 > /proc/sys/net/ipv4/ip_forward || true
+  sleep 1
+done
+
+[ "$(cat /proc/sys/net/ipv4/ip_forward || echo 0)" = "1" ] || \
+  warn "ip_forward 1 olamadı. Başka bir servis geri alıyor olabilir (örn. cloud-init/nm-cloud-setup)."
+
 ok "OS hazır"
+
 
 # ---------- 2) RPM kurulum ----------
 step "2) RPM'ler (kubeadm/kubelet/kubectl/containerd) offline kurulum"
