@@ -1,5 +1,5 @@
-Bu klasördeki *.tar.part-* parçaları offline tarafta birleştirip:
+Bu klasördeki *.tar.part-* parçalarını offline node üzerinde birleştirip:
   cat <ad>.tar.part-* > /tmp/<ad>.tar
-ve sonra:
+sonra:
   ctr -n k8s.io images import /tmp/<ad>.tar
 ile içeri alın. (amd64 arşivdir)
